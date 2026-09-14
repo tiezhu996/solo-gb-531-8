@@ -15,6 +15,18 @@ export interface Safeguard {
   verification_expires_at?: string
   verification_expired?: boolean
   target_scenario?: { id: number; parameter: string; scenario_state: string }
+  // 复评闭环投影
+  open_review_id?: number
+  open_review_due_at?: string
+  open_review_overdue?: boolean
+  review_pending?: boolean
+  latest_review_id?: number
+  latest_conclusion?: 'pass' | 'fail'
+  latest_checked_at?: string
+  latest_next_due_at?: string
+  latest_responsible?: string
+  latest_evidence?: string
+  completed_review_count?: number
 }
 
 export interface SafeguardInput {

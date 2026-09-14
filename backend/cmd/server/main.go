@@ -1,4 +1,5 @@
 package main
+
 import (
 	"context"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"syscall"
 	"time"
 )
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := run(logger); err != nil {
@@ -44,12 +46,14 @@ func run(logger *slog.Logger) error {
 	nodeRepo := repository.NewProcessNodeRepository(db)
 	scenarioRepo := repository.NewDeviationScenarioRepository(db)
 	safeguardRepo := repository.NewSafeguardRepository(db)
+	reviewRepo := repository.NewSafeguardReviewRepository(db)
 	evaluationRepo := repository.NewCoverageEvaluationRepository(db)
 	auditRepo := repository.NewAuditRepository(db)
 	userRepo := repository.NewUserRepository(db)
 	nodeHandler := handler.NewProcessNodeHandler(service.NewProcessNodeService(nodeRepo, auditRepo))
 	scenarioHandler := handler.NewDeviationScenarioHandler(service.NewDeviationScenarioService(scenarioRepo, nodeRepo, auditRepo))
-	safeguardHandler := handler.NewSafeguardHandler(service.NewSafeguardService(safeguardRepo, scenarioRepo, auditRepo))
+	safeguardHandler := handler.NewSafeguardHandler(service.NewSafeguardService(safeguardRepo, reviewRepo, scenarioRepo, auditRepo))
+	reviewHandler := handler.NewSafeguardReviewHandler(service.NewSafeguardReviewService(reviewRepo, safeguardRepo, auditRepo))
 	evaluationHandler := handler.NewCoverageEvaluationHandler(service.NewCoverageEvaluationService(
 		evaluationRepo, scenarioRepo, nodeRepo, safeguardRepo, auditRepo, algorithm.NewEvaluator(),
 	))
@@ -76,6 +80,7 @@ func run(logger *slog.Logger) error {
 	router.RegisterProcessNodeRoutes(api, nodeHandler)
 	router.RegisterDeviationScenarioRoutes(api, scenarioHandler)
 	router.RegisterSafeguardRoutes(api, safeguardHandler)
+	router.RegisterSafeguardReviewRoutes(api, reviewHandler)
 	router.RegisterCoverageEvaluationRoutes(api, evaluationHandler, runLimiter)
 	api.GET("/audit-logs", middleware.RequireRoles(constants.RoleAdmin, constants.RoleSafetyReviewer, constants.RoleAuditor), middleware.AuditListHandler(auditRepo))
 	api.GET("/meta/enums", middleware.RequirePermission(constants.PermissionRead), func(c *gin.Context) {
@@ -83,6 +88,8 @@ func run(logger *slog.Logger) error {
 			"deviation_guideword": constants.DeviationGuidewordValues(),
 			"coverage_state":      constants.CoverageStateValues(),
 			"scenario_state":      constants.ScenarioStateValues(),
+			"review_origin":       constants.ReviewOriginValues(),
+			"review_conclusion":   []string{"pass", "fail"},
 			"roles":               constants.RoleValues(),
 		})
 	})

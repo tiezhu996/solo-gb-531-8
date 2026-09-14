@@ -33,7 +33,9 @@ docker compose up -d --build
 
 - 工艺节点：维护节点编号、装置、介质、设计压力/温度、责任团队与启停状态，并汇总偏差数量和风险。
 - 偏差分析：使用 `no/more/less/reverse/other` 引导词记录参数、原因、后果和 5×5 风险矩阵，按受约束状态机完成多人复核。
-- 保护层台账：记录保护类型、目标场景、独立性键、有效性、测试间隔、最近验证时间与证据说明；过期或重复保护层不会被错误重复计分。
+- 保护层台账：记录保护类型、目标场景、独立性键、有效性、测试间隔、台账有效期与证据说明；过期或重复保护层不会被错误重复计分。
+- 复评闭环：每个保护层可登记历次校验（校验时间、合格/不合格结论、证据、责任人、下次到期时间）。合格办结更新台账有效期并恢复可用；不合格办结保持保护层不可用（`invalid`）并自动生成跟进复评任务。台账与详情同步显示待复评、逾期状态与最近结论。
+- 复评约束：同一保护层同时只允许一项未完成复评（数据库部分唯一索引 + 事务内校验，重复开启返回 `409`）；历史记录一经办结不可覆盖，重复办结返回 `409 INVALID_STATE_TRANSITION`。
 - 覆盖推演：冻结输入，构建原因到后果路径，找出未保护路径，按独立性键去重并保存评分步骤、输入哈希与算法版本。
 - 审计中心：按实体、操作者、request ID 和时间筛选写操作；展示变更前后快照及算法运行摘要。
 - 横切能力：JWT、RBAC、登录与算法限流、request ID、统一业务错误、panic recovery、事务状态迁移、幂等评估与结构化日志。
@@ -100,7 +102,8 @@ queued -> running -> completed -> confirmed
 | --- | --- | --- |
 | `/nodes` | `ProcessNode + DeviationScenario` | 建档、修改设计边界、停用、风险摘要 |
 | `/deviations` | `DeviationScenario + ProcessNode + Safeguard` | 编辑原因后果、风险分级、合法状态迁移 |
-| `/safeguards` | `Safeguard + DeviationScenario` | 登记、更新、失效/恢复、检查独立性与有效期 |
+| `/safeguards` | `Safeguard + SafeguardReview` | 登记、更新、失效/恢复、检查有效期、查看复评状态 |
+| `/safeguard-reviews` | `SafeguardReview + Safeguard` | 待复评/逾期总览、新增复评、办结并登记校验、历次时间线 |
 | `/coverage` | `CoverageEvaluation + DeviationScenario + Safeguard` | 幂等运行、轮询、路径解释、版本对比、确认/作废 |
 | `/audit` | 四个实体的审计投影 | 筛选 request ID、查看前后快照与算法元数据 |
 
@@ -121,9 +124,12 @@ queued -> running -> completed -> confirmed
 | `POST` | `/api/v1/deviation-scenarios/:id/transition` | 条件状态迁移 |
 | `GET/POST` | `/api/v1/safeguards` | 保护层列表与登记 |
 | `GET/PUT` | `/api/v1/safeguards/:id` | 保护层详情与更新 |
-| `POST` | `/api/v1/safeguards/:id/verify` | 更新验证证据与时间 |
+| `POST` | `/api/v1/safeguards/:id/verify` | 更新验证证据、台账有效期并追加一条合格校验记录 |
 | `POST` | `/api/v1/safeguards/:id/invalidate` | 标记失效 |
 | `POST` | `/api/v1/safeguards/:id/restore` | 恢复有效状态 |
+| `GET/POST` | `/api/v1/safeguards/:id/reviews` | 历次校验记录查询与新增复评任务 |
+| `GET/POST` | `/api/v1/safeguards/:id/reviews/:rid` | 单条复评读取与办结（登记校验时间/结论/证据/责任人/下次到期） |
+| `GET` | `/api/v1/safeguard-reviews` | 待复评/逾期任务总览（支持 `overdue_only`、`safeguard_id`） |
 | `GET/POST` | `/api/v1/coverage-evaluations` | 评估列表与幂等运行 |
 | `GET` | `/api/v1/coverage-evaluations/:id` | 读取不可变评估 |
 | `POST` | `/api/v1/coverage-evaluations/:id/replay` | 从快照确定性重放并比较 |

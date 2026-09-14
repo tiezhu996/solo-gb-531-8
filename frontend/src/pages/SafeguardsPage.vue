@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Ban, FileCheck2, Pencil, Plus, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-vue-next'
+import { Ban, ClipboardList, Pencil, Plus, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-vue-next'
 import AppShell from '../components/common/AppShell.vue'
 import PageHeader from '../components/common/PageHeader.vue'
 import EvidenceDrawer from '../components/common/EvidenceDrawer.vue'
+import ReviewDrawer from '../components/common/ReviewDrawer.vue'
 import { useAuth } from '../hooks/useAuth'
 import { useSafeguardStore } from '../stores/safeguard'
 import { useDeviationScenarioStore } from '../stores/deviation-scenario'
@@ -14,11 +15,15 @@ import type { Safeguard, SafeguardInput, SafeguardType } from '../types/safeguar
 const store = useSafeguardStore()
 const scenarios = useDeviationScenarioStore()
 const { canEdit, canReview } = useAuth()
+const canWriteReview = computed(() => canEdit.value || canReview.value)
 const dialog = ref(false)
 const drawer = ref(false)
+const reviewDrawer = ref(false)
 const editingId = ref<number>()
 const evidenceTarget = ref<Safeguard>()
+const reviewTarget = ref<Safeguard>()
 const filterScenario = ref<number>()
+const reviewFilter = ref<'' | 'open' | 'overdue' | 'none'>('')
 const saving = ref(false)
 const form = reactive<SafeguardInput>({ name: '', safeguard_type: 'interlock', target_scenario_id: 0, independence_key: '', effectiveness: 0.8, test_interval_days: 365, last_verified_at: new Date().toISOString(), evidence_note: '' })
 const typeLabels: Record<SafeguardType, string> = { alarm: '报警与人员响应', interlock: '安全联锁', relief: '泄放保护', procedural: '管理程序', containment: '物理包容', detection: '检测与响应' }
@@ -30,11 +35,19 @@ function expiry(item: Safeguard) { if (item.verification_expires_at) return item
 function expiryLabel(item: Safeguard) { const value = expiry(item); return value ? new Date(value).toLocaleDateString('zh-CN') : '尚未验证' }
 function isExpired(item: Safeguard) { const value = expiry(item); return item.verification_expired ?? (!value || new Date(value).getTime() < Date.now()) }
 
-async function refresh() { try { await Promise.all([store.load(), scenarios.load()]) } catch (error) { ElMessage.error(errorMessage(error)) } }
+async function refresh() {
+  try {
+    await Promise.all([
+      store.load({ scenarioId: filterScenario.value, reviewStatus: reviewFilter.value || undefined }),
+      scenarios.load(),
+    ])
+  } catch (error) { ElMessage.error(errorMessage(error)) }
+}
 function resetForm() { Object.assign(form, { name: '', safeguard_type: 'interlock' as SafeguardType, target_scenario_id: scenarios.items[0]?.id ?? 0, independence_key: '', effectiveness: 0.8, test_interval_days: 365, last_verified_at: new Date().toISOString(), evidence_note: '' }) }
 function openCreate() { editingId.value = undefined; resetForm(); dialog.value = true }
 function openEdit(item: Safeguard) { editingId.value = item.id; Object.assign(form, { name: item.name, safeguard_type: item.safeguard_type, target_scenario_id: item.target_scenario_id, independence_key: item.independence_key, effectiveness: item.effectiveness, test_interval_days: item.test_interval_days, last_verified_at: item.last_verified_at, evidence_note: item.evidence_note }); dialog.value = true }
 function showEvidence(item: Safeguard) { evidenceTarget.value = item; drawer.value = true }
+function showReviews(item: Safeguard) { reviewTarget.value = item; reviewDrawer.value = true }
 async function save() { saving.value = true; try { editingId.value ? await store.update(editingId.value, form) : await store.create(form); dialog.value = false; ElMessage.success(editingId.value ? '保护层已更新' : '保护层已登记') } catch (error) { ElMessage.error(errorMessage(error)) } finally { saving.value = false } }
 async function action(item: Safeguard, kind: 'verify' | 'invalidate' | 'restore') { try { if (kind === 'verify') await store.verify(item.id, item.evidence_note || '台账复核完成'); else if (kind === 'invalidate') await store.invalidate(item.id, '安全复核员标记失效'); else await store.restore(item.id, '证据复核后恢复'); ElMessage.success('保护层生命周期已更新') } catch (error) { ElMessage.error(errorMessage(error)) } }
 onMounted(refresh)
@@ -42,20 +55,52 @@ onMounted(refresh)
 
 <template>
   <AppShell>
-    <PageHeader eyebrow="INDEPENDENT PROTECTION REGISTER" title="保护层台账" description="核对覆盖目标、独立性键、有效性与验证期限；同一路径的重复独立性键只计一次。">
+    <PageHeader eyebrow="INDEPENDENT PROTECTION REGISTER" title="保护层台账" description="登记历次校验与复评闭环：合格更新台账有效期，不合格保持不可用并生成跟进复评。">
       <el-button :loading="store.loading" @click="refresh"><RefreshCw :size="16" />刷新</el-button>
       <el-button v-if="canEdit" type="primary" @click="openCreate"><Plus :size="16" />登记保护层</el-button>
     </PageHeader>
-    <section class="filter-bar"><div><ShieldCheck :size="16" /><el-select v-model="filterScenario" placeholder="全部偏差场景" clearable><el-option v-for="item in scenarios.items" :key="item.id" :label="scenarioLabel(item.id)" :value="item.id" /></el-select></div><span>{{ visible.length }} 项保护措施 · {{ Object.keys(duplicateKeys).length }} 个独立键</span></section>
+    <section class="filter-bar">
+      <div>
+        <ShieldCheck :size="16" />
+        <el-select v-model="filterScenario" placeholder="全部偏差场景" clearable @change="refresh">
+          <el-option v-for="item in scenarios.items" :key="item.id" :label="scenarioLabel(item.id)" :value="item.id" />
+        </el-select>
+        <el-radio-group v-model="reviewFilter" size="small" @change="refresh">
+          <el-radio-button label="">全部</el-radio-button>
+          <el-radio-button label="open">待复评</el-radio-button>
+          <el-radio-button label="overdue">已逾期</el-radio-button>
+          <el-radio-button label="none">无待办</el-radio-button>
+        </el-radio-group>
+      </div>
+      <span>{{ visible.length }} 项保护措施 · {{ Object.keys(duplicateKeys).length }} 个独立键</span>
+    </section>
     <section class="data-section">
       <el-table v-loading="store.loading" :data="visible" row-key="id" empty-text="暂无保护措施">
-        <el-table-column label="保护措施" min-width="220"><template #default="{ row }"><div class="primary-cell"><strong>{{ row.name }}</strong><span>{{ typeLabels[row.safeguard_type as SafeguardType] || row.safeguard_type }}</span></div></template></el-table-column>
-        <el-table-column label="覆盖目标" min-width="190"><template #default="{ row }">{{ scenarioLabel(row.target_scenario_id) }}</template></el-table-column>
-        <el-table-column label="独立性键" min-width="150"><template #default="{ row }"><code class="independence-key">{{ row.independence_key }}</code><small v-if="duplicateKeys[row.independence_key] > 1" class="duplicate-note">同场景将去重</small></template></el-table-column>
-        <el-table-column label="有效性" width="115"><template #default="{ row }"><span class="numeric">{{ Math.round(row.effectiveness * 100) }}%</span></template></el-table-column>
-        <el-table-column label="验证有效期" min-width="170"><template #default="{ row }"><span class="date-cell" :class="{ expired: isExpired(row) }">{{ expiryLabel(row) }}</span><small class="cell-note">间隔 {{ row.test_interval_days }} 天</small></template></el-table-column>
-        <el-table-column label="生命周期" width="110"><template #default="{ row }"><span class="state-label" :class="isExpired(row) ? 'expired' : row.lifecycle_state">{{ isExpired(row) ? '已过期' : row.lifecycle_state }}</span></template></el-table-column>
-        <el-table-column label="操作" width="195" fixed="right"><template #default="{ row }"><el-tooltip content="查看证据"><el-button circle text aria-label="查看证据" @click="showEvidence(row)"><FileCheck2 :size="16" /></el-button></el-tooltip><el-tooltip v-if="canEdit" content="编辑"><el-button circle text aria-label="编辑" @click="openEdit(row)"><Pencil :size="16" /></el-button></el-tooltip><el-tooltip v-if="canReview" content="记录本次验证"><el-button circle text type="success" aria-label="验证保护层" @click="action(row, 'verify')"><ShieldCheck :size="16" /></el-button></el-tooltip><el-tooltip v-if="canReview && ['pending','active','expired'].includes(row.lifecycle_state)" content="标记失效"><el-button circle text type="danger" aria-label="标记失效" @click="action(row, 'invalidate')"><Ban :size="16" /></el-button></el-tooltip><el-tooltip v-if="canReview && row.lifecycle_state === 'invalid'" content="恢复到待验证状态"><el-button circle text type="success" aria-label="恢复" @click="action(row, 'restore')"><RotateCcw :size="16" /></el-button></el-tooltip></template></el-table-column>
+        <el-table-column label="保护措施" min-width="200"><template #default="{ row }"><div class="primary-cell"><strong>{{ row.name }}</strong><span>{{ typeLabels[row.safeguard_type as SafeguardType] || row.safeguard_type }}</span></div></template></el-table-column>
+        <el-table-column label="覆盖目标" min-width="170"><template #default="{ row }">{{ scenarioLabel(row.target_scenario_id) }}</template></el-table-column>
+        <el-table-column label="独立性键" min-width="140"><template #default="{ row }"><code class="independence-key">{{ row.independence_key }}</code><small v-if="duplicateKeys[row.independence_key] > 1" class="duplicate-note">同场景将去重</small></template></el-table-column>
+        <el-table-column label="台账有效期" min-width="150"><template #default="{ row }"><span class="date-cell" :class="{ expired: isExpired(row) }">{{ expiryLabel(row) }}</span><small class="cell-note">间隔 {{ row.test_interval_days }} 天</small></template></el-table-column>
+        <el-table-column label="生命周期" width="100"><template #default="{ row }"><span class="state-label" :class="isExpired(row) ? 'expired' : row.lifecycle_state">{{ isExpired(row) ? '已过期' : row.lifecycle_state }}</span></template></el-table-column>
+        <el-table-column label="复评状态" min-width="210">
+          <template #default="{ row }">
+            <div class="review-cell">
+              <span v-if="row.review_pending" class="state-label" :class="row.open_review_overdue ? 'failed' : 'analyzed'">
+                {{ row.open_review_overdue ? '复评已逾期' : '待复评' }}
+              </span>
+              <span v-else-if="row.latest_conclusion" class="state-label" :class="row.latest_conclusion === 'pass' ? 'completed' : 'failed'">
+                最近{{ row.latest_conclusion === 'pass' ? '合格' : '不合格' }}
+              </span>
+              <span v-else class="muted">无复评</span>
+              <small v-if="row.review_pending && row.open_review_due_at" :class="{ expired: row.open_review_overdue }">
+                到期 {{ new Date(row.open_review_due_at).toLocaleDateString('zh-CN') }}
+              </small>
+              <small v-else-if="row.latest_checked_at">
+                校验于 {{ new Date(row.latest_checked_at).toLocaleDateString('zh-CN') }}
+              </small>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="265" fixed="right"><template #default="{ row }"><el-tooltip content="证据"><el-button circle text aria-label="查看证据" @click="showEvidence(row)"><ShieldCheck :size="16" /></el-button></el-tooltip><el-tooltip v-if="canEdit" content="编辑"><el-button circle text aria-label="编辑" @click="openEdit(row)"><Pencil :size="16" /></el-button></el-tooltip><el-tooltip content="复评与历次校验"><el-button circle text type="primary" aria-label="复评记录" @click="showReviews(row)"><ClipboardList :size="16" /></el-button></el-tooltip><el-tooltip v-if="canReview" content="快速登记合格验证"><el-button circle text type="success" aria-label="登记验证" @click="action(row, 'verify')"><ShieldCheck :size="16" /></el-button></el-tooltip><el-tooltip v-if="canReview && ['pending','active','expired'].includes(row.lifecycle_state)" content="标记失效"><el-button circle text type="danger" aria-label="标记失效" @click="action(row, 'invalidate')"><Ban :size="16" /></el-button></el-tooltip><el-tooltip v-if="canReview && row.lifecycle_state === 'invalid'" content="恢复到待验证状态"><el-button circle text type="success" aria-label="恢复" @click="action(row, 'restore')"><RotateCcw :size="16" /></el-button></el-tooltip></template></el-table-column>
       </el-table>
     </section>
     <el-dialog v-model="dialog" :title="editingId ? '编辑保护层' : '登记独立保护层'" width="min(700px, 94vw)">
@@ -69,5 +114,6 @@ onMounted(refresh)
       <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :loading="saving" @click="save">保存保护层</el-button></template>
     </el-dialog>
     <EvidenceDrawer v-model="drawer" :title="evidenceTarget?.name" :note="evidenceTarget?.evidence_note" :evidence="evidenceTarget" />
+    <ReviewDrawer v-model="reviewDrawer" :safeguard="reviewTarget" :writable="canWriteReview" @changed="refresh" />
   </AppShell>
 </template>

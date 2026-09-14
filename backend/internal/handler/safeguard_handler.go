@@ -25,7 +25,9 @@ func (h *SafeguardHandler) List(c *gin.Context) {
 	page, size := util.Pagination(c)
 	result, serviceErr := h.service.List(c.Request.Context(), dto.SafeguardQuery{
 		ScenarioID: scenarioID, Type: c.Query("type"), LifecycleState: c.Query("lifecycle_state"),
-		ExpiredOnly: expired, Search: c.Query("search"), Page: page, PageSize: size,
+		ExpiredOnly: expired, ReviewStatus: c.Query("review_status"),
+		LatestConclusion: c.Query("latest_conclusion"),
+		Search: c.Query("search"), Page: page, PageSize: size,
 	})
 	respond(c, http.StatusOK, result, serviceErr)
 }

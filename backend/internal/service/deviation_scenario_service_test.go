@@ -74,7 +74,7 @@ func testDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&model.User{}, &model.ProcessNode{}, &model.DeviationScenario{},
-		&model.Safeguard{}, &model.CoverageEvaluation{}, &model.AuditLog{},
+		&model.Safeguard{}, &model.SafeguardReview{}, &model.CoverageEvaluation{}, &model.AuditLog{},
 	); err != nil {
 		t.Fatalf("migrate test database: %v", err)
 	}

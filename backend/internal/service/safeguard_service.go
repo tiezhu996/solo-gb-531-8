@@ -1,4 +1,5 @@
 package service
+
 import (
 	"context"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"time"
 )
+
 type SafeguardService interface {
 	Create(context.Context, dto.CreateSafeguardRequest, util.Actor) (dto.SafeguardResponse, error)
 	Get(context.Context, uint) (dto.SafeguardResponse, error)
@@ -22,17 +24,20 @@ type SafeguardService interface {
 }
 type safeguardService struct {
 	safeguards repository.SafeguardRepository
+	reviews    repository.SafeguardReviewRepository
 	scenarios  repository.DeviationScenarioRepository
 	audits     repository.AuditRepository
 	now        func() time.Time
 }
+
 func NewSafeguardService(
 	safeguards repository.SafeguardRepository,
+	reviews repository.SafeguardReviewRepository,
 	scenarios repository.DeviationScenarioRepository,
 	audits repository.AuditRepository,
 ) SafeguardService {
 	return &safeguardService{
-		safeguards: safeguards, scenarios: scenarios, audits: audits,
+		safeguards: safeguards, reviews: reviews, scenarios: scenarios, audits: audits,
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -88,7 +93,13 @@ func (s *safeguardService) Get(ctx context.Context, id uint) (dto.SafeguardRespo
 		}
 		return dto.SafeguardResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load safeguard", err)
 	}
-	return dto.NewSafeguardResponse(safeguard, s.now()), nil
+	response := dto.NewSafeguardResponse(safeguard, s.now())
+	bundle, err := s.reviewBundle(ctx, []uint{id})
+	if err != nil {
+		return dto.SafeguardResponse{}, err
+	}
+	response.AttachReviewProjection(bundle[id], s.now())
+	return response, nil
 }
 func (s *safeguardService) List(ctx context.Context, query dto.SafeguardQuery) (dto.SafeguardListResponse, error) {
 	now := s.now()
@@ -96,14 +107,57 @@ func (s *safeguardService) List(ctx context.Context, query dto.SafeguardQuery) (
 	if err != nil {
 		return dto.SafeguardListResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to list safeguards", err)
 	}
+	ids := make([]uint, 0, len(safeguards))
+	for _, safeguard := range safeguards {
+		ids = append(ids, safeguard.ID)
+	}
+	bundles, err := s.reviewBundle(ctx, ids)
+	if err != nil {
+		return dto.SafeguardListResponse{}, err
+	}
 	response := dto.SafeguardListResponse{
 		Items: make([]dto.SafeguardResponse, 0, len(safeguards)),
 		Total: total, Page: query.Page, Size: query.PageSize,
 	}
 	for _, safeguard := range safeguards {
-		response.Items = append(response.Items, dto.NewSafeguardResponse(safeguard, now))
+		item := dto.NewSafeguardResponse(safeguard, now)
+		item.AttachReviewProjection(bundles[safeguard.ID], now)
+		response.Items = append(response.Items, item)
 	}
 	return response, nil
+}
+
+// reviewBundle 一次性聚合每个保护层的未完成复评、最近结论与历史次数，避免台账 N+1 查询。
+func (s *safeguardService) reviewBundle(ctx context.Context, ids []uint) (map[uint]dto.SafeguardReviewBundle, error) {
+	bundles := make(map[uint]dto.SafeguardReviewBundle, len(ids))
+	for _, id := range ids {
+		bundles[id] = dto.SafeguardReviewBundle{}
+	}
+	open, err := s.reviews.FindOpenBySafeguards(ctx, ids)
+	if err != nil {
+		return nil, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load open reviews", err)
+	}
+	latest, err := s.reviews.LatestCompletedBySafeguards(ctx, ids)
+	if err != nil {
+		return nil, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load latest reviews", err)
+	}
+	counts, err := s.reviews.CompletedCountBySafeguards(ctx, ids)
+	if err != nil {
+		return nil, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to count reviews", err)
+	}
+	for id := range bundles {
+		bundle := dto.SafeguardReviewBundle{Completed: counts[id]}
+		if review, ok := open[id]; ok {
+			reviewCopy := review
+			bundle.Open = &reviewCopy
+		}
+		if review, ok := latest[id]; ok {
+			reviewCopy := review
+			bundle.Latest = &reviewCopy
+		}
+		bundles[id] = bundle
+	}
+	return bundles, nil
 }
 func (s *safeguardService) Update(
 	ctx context.Context,
@@ -138,9 +192,8 @@ func (s *safeguardService) Update(
 	if request.EvidenceNote != nil {
 		safeguard.EvidenceNote = *request.EvidenceNote
 	}
-	if safeguard.LastVerifiedAt != nil {
-		expires := safeguard.LastVerifiedAt.AddDate(0, 0, safeguard.TestIntervalDays)
-		if s.now().After(expires) && safeguard.LifecycleState == "active" {
+	if expires := safeguard.VerificationExpiresAt(); expires != nil {
+		if s.now().After(*expires) && safeguard.LifecycleState == "active" {
 			safeguard.LifecycleState = "expired"
 		}
 	}
@@ -176,29 +229,33 @@ func (s *safeguardService) Verify(
 	if request.VerifiedAt.After(now.Add(5 * time.Minute)) {
 		return dto.SafeguardResponse{}, util.NewError(http.StatusUnprocessableEntity, util.CodeValidation, "verified_at cannot be in the future")
 	}
-	if now.After(request.VerifiedAt.AddDate(0, 0, safeguard.TestIntervalDays)) {
+	nextDueAt := request.VerifiedAt.AddDate(0, 0, safeguard.TestIntervalDays)
+	if now.After(nextDueAt) {
 		return dto.SafeguardResponse{}, util.NewError(http.StatusUnprocessableEntity, util.CodeValidation, "verification is already expired")
 	}
 	before := safeguard
-	updates := map[string]any{
-		"last_verified_at": request.VerifiedAt.UTC(), "last_verification_by": actor.UserID,
-		"evidence_note": request.EvidenceNote,
-	}
-	changed, err := s.safeguards.SetLifecycle(ctx, id, []string{"pending", "active", "expired", "invalid"}, "active", updates)
+	after, _, changed, err := s.reviews.VerifyWithSafeguard(ctx, repository.VerifyClosure{
+		SafeguardID: id, FromStates: []string{"pending", "active", "expired", "invalid"},
+		VerifiedAt: request.VerifiedAt, NextDueAt: nextDueAt,
+		Evidence: request.EvidenceNote,
+		ActorID:  actor.UserID, ActorName: actor.Username, Now: now,
+	})
 	if err != nil {
 		return dto.SafeguardResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to verify safeguard", err)
 	}
 	if !changed {
 		return dto.SafeguardResponse{}, util.NewError(http.StatusConflict, util.CodeConflict, "safeguard state changed concurrently")
 	}
-	after, err := s.safeguards.GetByID(ctx, id)
-	if err != nil {
-		return dto.SafeguardResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to reload safeguard", err)
-	}
 	if err := s.recordAudit(ctx, actor, id, "verify", before, after, request.EvidenceNote); err != nil {
 		return dto.SafeguardResponse{}, err
 	}
-	return dto.NewSafeguardResponse(after, now), nil
+	response := dto.NewSafeguardResponse(after, now)
+	bundle, err := s.reviewBundle(ctx, []uint{id})
+	if err != nil {
+		return dto.SafeguardResponse{}, err
+	}
+	response.AttachReviewProjection(bundle[id], now)
+	return response, nil
 }
 func (s *safeguardService) Invalidate(
 	ctx context.Context,

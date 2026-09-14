@@ -2,8 +2,20 @@ import { api, json, query } from './client'
 import { normalizePage, type PageData } from '../types/common'
 import type { Safeguard, SafeguardInput } from '../types/safeguard'
 
-export async function listSafeguards(scenarioId?: number): Promise<PageData<Safeguard>> {
-  return normalizePage(await api<PageData<Safeguard> | Safeguard[]>(`/safeguards${query({ scenario_id: scenarioId })}`))
+export interface SafeguardListParams {
+  scenarioId?: number
+  reviewStatus?: 'open' | 'overdue' | 'none'
+  latestConclusion?: 'pass' | 'fail'
+  expiredOnly?: boolean
+}
+
+export async function listSafeguards(params: SafeguardListParams = {}): Promise<PageData<Safeguard>> {
+  return normalizePage(await api<PageData<Safeguard> | Safeguard[]>(`/safeguards${query({
+    scenario_id: params.scenarioId,
+    review_status: params.reviewStatus,
+    latest_conclusion: params.latestConclusion,
+    expired_only: params.expiredOnly === undefined ? undefined : String(params.expiredOnly),
+  })}`))
 }
 export const getSafeguard = (id: number) => api<Safeguard>(`/safeguards/${id}`)
 export const createSafeguard = (input: SafeguardInput) => api<Safeguard>('/safeguards', json('POST', input))

@@ -1,4 +1,5 @@
 package repository
+
 import (
 	"context"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 )
+
 type SafeguardRepository interface {
 	Create(context.Context, *model.Safeguard) error
 	GetByID(context.Context, uint) (model.Safeguard, error)
@@ -17,6 +19,7 @@ type SafeguardRepository interface {
 	SetLifecycle(context.Context, uint, []string, string, map[string]any) (bool, error)
 }
 type safeguardRepository struct{ db *gorm.DB }
+
 func NewSafeguardRepository(db *gorm.DB) SafeguardRepository {
 	return &safeguardRepository{db: db}
 }
@@ -49,11 +52,22 @@ func (r *safeguardRepository) List(ctx context.Context, query dto.SafeguardQuery
 		base = base.Where("LOWER(name) LIKE ? OR LOWER(independence_key) LIKE ? OR LOWER(evidence_note) LIKE ?", pattern, pattern, pattern)
 	}
 	if query.ExpiredOnly {
-		expiry := "datetime(last_verified_at, '+' || test_interval_days || ' days')"
+		expiry := "datetime(COALESCE(verified_until, datetime(last_verified_at, '+' || test_interval_days || ' days')))"
 		if r.db.Dialector.Name() == "postgres" {
-			expiry = "last_verified_at + (test_interval_days * INTERVAL '1 day')"
+			expiry = "COALESCE(verified_until, last_verified_at + (test_interval_days * INTERVAL '1 day'))"
 		}
 		base = base.Where("last_verified_at IS NULL OR test_interval_days <= 0 OR "+expiry+" < ?", now)
+	}
+	switch query.ReviewStatus {
+	case "open":
+		base = base.Where("EXISTS (SELECT 1 FROM safeguard_reviews sr WHERE sr.safeguard_id = safeguards.id AND sr.status = ?)", "open")
+	case "overdue":
+		base = base.Where("EXISTS (SELECT 1 FROM safeguard_reviews sr WHERE sr.safeguard_id = safeguards.id AND sr.status = ? AND sr.due_at IS NOT NULL AND sr.due_at < ?)", "open", now)
+	case "none":
+		base = base.Where("NOT EXISTS (SELECT 1 FROM safeguard_reviews sr WHERE sr.safeguard_id = safeguards.id AND sr.status = ?)", "open")
+	}
+	if query.LatestConclusion == "pass" || query.LatestConclusion == "fail" {
+		base = base.Where("(SELECT sr.conclusion FROM safeguard_reviews sr WHERE sr.safeguard_id = safeguards.id AND sr.status = ? ORDER BY sr.id DESC LIMIT 1) = ?", "completed", query.LatestConclusion)
 	}
 	var total int64
 	if err := base.Count(&total).Error; err != nil {

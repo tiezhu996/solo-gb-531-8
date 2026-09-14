@@ -1,4 +1,5 @@
 package database
+
 import (
 	"context"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"hazop-safeguard-coverage/backend/internal/model"
 	"time"
 )
+
 func Open(cfg config.Config) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	switch cfg.DBDriver {
@@ -62,6 +64,7 @@ func migrate(db *gorm.DB) error {
 		&model.ProcessNode{},
 		&model.DeviationScenario{},
 		&model.Safeguard{},
+		&model.SafeguardReview{},
 		&model.CoverageEvaluation{},
 		&model.AuditLog{},
 	)
@@ -70,12 +73,14 @@ func migrate(db *gorm.DB) error {
 	}
 	return nil
 }
+
 type seedAccount struct {
 	Username    string
 	DisplayName string
 	Password    string
 	Role        constants.Role
 }
+
 func seed(db *gorm.DB) error {
 	accounts := []seedAccount{
 		{Username: "admin", DisplayName: "System Administrator", Password: "admin123", Role: constants.RoleAdmin},
@@ -169,11 +174,13 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 	}
 	validVerification := now.AddDate(0, 0, -20)
 	expiredVerification := now.AddDate(0, 0, -500)
+	failedVerification := now.AddDate(0, 0, -100)
+	validUntil := now.AddDate(0, 0, 345)
 	safeguards := []model.Safeguard{
 		{
 			Name: "High temperature SIS trip", SafeguardType: "interlock",
 			TargetScenarioID: scenarios[0].ID, IndependenceKey: "SIS-R101-TEMP",
-			Effectiveness: 0.8, TestIntervalDays: 365, LastVerifiedAt: &validVerification,
+			Effectiveness: 0.8, TestIntervalDays: 365, LastVerifiedAt: &validVerification, VerifiedUntil: &validUntil,
 			LifecycleState: "active", EvidenceNote: "Proof-test certificate SIS-2026-041",
 			LastVerificationBy: &reviewer.ID, CreatedAt: now, UpdatedAt: now,
 		},
@@ -198,9 +205,64 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 			LifecycleState: "active", EvidenceNote: "Inspection record CV-882",
 			LastVerificationBy: &reviewer.ID, CreatedAt: now, UpdatedAt: now,
 		},
+		{
+			Name: "Emergency isolation valve XV-105", SafeguardType: "interlock",
+			TargetScenarioID: scenarios[0].ID, IndependenceKey: "SDV-R101-ISO",
+			Effectiveness: 0.85, TestIntervalDays: 180, LastVerifiedAt: &failedVerification,
+			LifecycleState: "invalid", EvidenceNote: "Stroke time exceeded specification during proof test",
+			LastVerificationBy: &reviewer.ID, CreatedAt: now, UpdatedAt: now,
+		},
 	}
 	if err := tx.Create(&safeguards).Error; err != nil {
 		return fmt.Errorf("create seed safeguards: %w", err)
+	}
+	sisCheckedAt := now.AddDate(0, 0, -20)
+	psvOpenedAt := now.AddDate(0, 0, -10)
+	psvDueAt := now.AddDate(0, 0, -7)
+	failCheckedAt := now.AddDate(0, 0, -30)
+	failFollowupDueAt := now.AddDate(0, 0, -5)
+	failCompletedAt := now.AddDate(0, 0, -30)
+	reviews := []model.SafeguardReview{
+		{
+			SafeguardID: safeguards[0].ID, Sequence: 1, Status: "completed", Origin: "manual",
+			Reason: "年度周期校验", OpenedAt: now.AddDate(0, 0, -21), OpenedBy: reviewer.ID,
+			OpenedByName: reviewer.Username, CompletedAt: &sisCheckedAt, CheckedAt: &sisCheckedAt,
+			Conclusion: "pass", Evidence: "Proof-test certificate SIS-2026-041；动作试验与旁路试验均合格",
+			Responsible: reviewer.Username, ResponsibleID: &reviewer.ID, NextDueAt: &validUntil,
+			ClosedBy: &reviewer.ID, ClosedByName: reviewer.Username, CreatedAt: now.AddDate(0, 0, -21),
+			UpdatedAt: sisCheckedAt,
+		},
+		{
+			SafeguardID: safeguards[2].ID, Sequence: 1, Status: "open", Origin: "expiry",
+			Reason: "校验证书已过期，需要重新校验泄放阀整定压力", DueAt: &psvDueAt,
+			OpenedAt: psvOpenedAt, OpenedBy: reviewer.ID, OpenedByName: reviewer.Username,
+			CreatedAt: psvOpenedAt, UpdatedAt: psvOpenedAt,
+		},
+		{
+			SafeguardID: safeguards[4].ID, Sequence: 1, Status: "completed", Origin: "manual",
+			Reason: "半年周期校验", OpenedAt: now.AddDate(0, 0, -31), OpenedBy: engineer.ID,
+			OpenedByName: engineer.Username, CompletedAt: &failCompletedAt, CheckedAt: &failCheckedAt,
+			Conclusion: "fail", Evidence: "全行程时间 28s，超出 15s 限值；阀门保持不可用",
+			Responsible: engineer.Username, ResponsibleID: &engineer.ID, NextDueAt: &failFollowupDueAt,
+			ClosedBy: &reviewer.ID, ClosedByName: reviewer.Username, CreatedAt: now.AddDate(0, 0, -31),
+			UpdatedAt: failCompletedAt,
+		},
+		{
+			SafeguardID: safeguards[4].ID, Sequence: 2, Status: "open", Origin: "failure",
+			Reason: "复评不合格（全行程时间超标），整改后重新校验", DueAt: &failFollowupDueAt,
+			OpenedAt: failCompletedAt, OpenedBy: reviewer.ID, OpenedByName: reviewer.Username,
+			CreatedAt: failCompletedAt, UpdatedAt: failCompletedAt,
+		},
+	}
+	firstBatch := reviews[:3]
+	if err := tx.Create(&firstBatch).Error; err != nil {
+		return fmt.Errorf("create seed safeguard reviews: %w", err)
+	}
+	followup := reviews[3]
+	parentID := reviews[2].ID
+	followup.ParentReviewID = &parentID
+	if err := tx.Create(&followup).Error; err != nil {
+		return fmt.Errorf("create seed safeguard review follow-up: %w", err)
 	}
 	return nil
 }
